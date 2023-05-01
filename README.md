@@ -2,7 +2,7 @@
 
 Nesta primeira parte foi iniciado os trabalhos com alguns dos principais dados dos logs da IARA.
 
-## Passos :pushpin:
+## Informações :pushpin:
 
 - [Mensagens de interese do log](#instalação) <br>
 > **XSENS_QUAT**: IMU <br>
