@@ -1,0 +1,6 @@
+python - 3.8.10
+matplotlib - 3.7.1
+opencv - 4.7.0.72
+open3D - 0.13.0
+struct - 1.5.4
+numpy - 1.24.3
