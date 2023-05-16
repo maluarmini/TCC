@@ -5,6 +5,17 @@ import math
 import open3d as o3d
 import numpy as np
 
+# define a estrutura do registro do arquivo index
+index_format = "<8sL"
+path_txt = './logs_iara/logs_iara/log-volta-da-ufes-20181206.txt'
+path_index = './logs_iara/logs_iara/log-volta-da-ufes-20181206.txt.index'
+
+matplotlib.use('TkAgg') 
+
+ranger_init = 100
+ranger_end = 103
+
+
 def carmen_global_convert_degmin_to_double(dm_format: float) -> float:
     degree = math.floor(dm_format / 100.0)
     minutes = (dm_format - degree * 100.0) / 60.0
@@ -145,23 +156,17 @@ class GdcToUtm:
 
         return utm_x, utm_y, utm_z, utm_zone, utm_hemisphere_north
 
-# define a estrutura do registro do arquivo index
-index_format = "<8sL"
-
-path_txt = './logs_iara/logs_iara/log-volta-da-ufes-20181206.txt'
-path_index = './logs_iara/logs_iara/log-volta-da-ufes-20181206.txt.index'
 
 points_angle = []
 
-def calcular_angulos(x_point, y_point):
+def calcular_angulos(x_point, y_point,i, time):
     p0 = [x_point, y_point]
     theta = 0
     for i in range(len(x_points)):
-        dist = ((p0[0] - x_points[i]) ** 2 + (p0[1] - y_points[i]) ** 2) ** 0.5
         if ((p0[0] - x_points[i]) ** 2 + (p0[1] - y_points[i]) ** 2) ** 0.5 > 5:
             theta = math.atan2(y_points[i] - p0[1], x_points[i] - p0[0])
             # faz uma tupla com o angulo e o ponto
-            points_angle.append((x_point, y_point, theta))
+            points_angle.append((x_point, y_point, theta, time))
             break
 
 # Velodyne vertical angles e ray order
@@ -182,6 +187,8 @@ x_points = []
 y_points = []
 times_gps = []
 
+
+
 def gps_data():
     # GPS
     print("GPS INIT")
@@ -193,17 +200,16 @@ def gps_data():
                 lines.append(line.strip())
 
         data = []
+        lines = sorted(lines, key=lambda x: float(x[-3]))
         for line in lines:
             words = line.split(" ")
             data.append([words[3], words[5], words[11], words[4], words[6]])            
-            times_gps.append(float(words[-1]))
+            times_gps.append(float(words[-3]))
 
     for line in data:
         x, y, z, _, _ = GdcToUtm.Convert(
             line[0], line[1], line[2], line[3], line[4])
         convert_data.append([x, y, z])
-
-    matplotlib.use('TkAgg') 
 
     for ponto in convert_data:
         x, y, _ = ponto
@@ -213,11 +219,12 @@ def gps_data():
     # plt.scatter(x_points, y_points)
     # plt.show()        
     for i in range(len(x_points)):
-        calcular_angulos(x_points[i], y_points[i])
+        calcular_angulos(x_points[i], y_points[i],i, times_gps[i])
+    print("END GPS\n") 
 
 gps_data()
-print("END GPS\n") 
 
+# points_angle : (x, y, theta, time) - GPS
 
 velocity = []
 angle = []
@@ -233,25 +240,22 @@ def dead_reckoning_data():
         for line in file:
             if line.startswith('ROBOTVELOCITY_ACK'):
                 lines.append(line.strip())
-    
+
+        lines = sorted(lines, key=lambda x: float(x[-3]))
         for line in lines:
             words = line.split(" ")
             velocity.append(words[1])
             angle.append(words[2])
-            times_dead_reckoning.append(float(words[-1]))
+            times_dead_reckoning.append(float(words[-3]))
 
     v_m = 1.0
     a_m = 0.89
     a_add = -0.004
 
-    # Convertendo elementos de velocity em float
+    # Convertendo elementos de velocity e angle em float
     for i in range(len(velocity)):
         velocity[i] = float(velocity[i]) * v_m
-
-    # Convertendo elementos de angle em float
-    for i in range(len(angle)):
         angle[i] = float(angle[i]) * a_m + a_add
-
 
     # Angulo inicial
     p0 = [x_points[0], y_points[0]]
@@ -260,8 +264,9 @@ def dead_reckoning_data():
             theta = math.atan2(y_points[i] - p0[1], x_points[i] - p0[0])
             break
 
-            # Definindo as variáveis do modelo de Arckermann
-    L = 2.5  # Distância entre eixos do veículo
+    # Definindo as variáveis do modelo de Arckermann
+
+    L = 2.625  # Distância entre eixos do veículo
     dt = 0.1  # Intervalo de tempo entre as medições
     t = 0.0  # Tempo inicial
     x = x_points[0]  # Posição inicial em x
@@ -273,8 +278,6 @@ def dead_reckoning_data():
     x_traj = [x]
     y_traj = [y]
 
-
-
     # Calculando a trajetória usando o modelo de Arckermann
     for i in range(1, len(velocity)):
 
@@ -284,15 +287,15 @@ def dead_reckoning_data():
         x = x + v * math.cos(theta) * dt
         y = y + v * math.sin(theta) * dt
         theta = theta + (v / L) * math.tan(angle[i]) * dt
-
+        time = times_dead_reckoning[i]
         # Salvando os pontos de trajetória calculados
         x_traj.append(x)
         y_traj.append(y)
 
-        points_angle_dead_reckoning.append((x, y, theta))
+        points_angle_dead_reckoning.append((x, y, theta, time))
+    print("END DEAD RECKONING\n")
     
 dead_reckoning_data()
-print("END DEAD RECKONING\n")
 
 path_array = []
 number_shots_array = []
@@ -300,20 +303,21 @@ times_clouds_points = []
 data = []
 clouds_points = []
 points = []
+points_time = []
 colors = []
 
-ranger_init = 0
-ranger_end = 2
 def velodyne_data():
     # Velodyne
     print("INIT VELODYNE")
     # Abre o arquivo de dados para leitura
     lines = []
+    points_velodyne = []
     with open(path_txt, 'r') as file:
         for line in file:
             if line.startswith('VELODYNE_PARTIAL_SCAN_IN_FILE'):
                 lines.append(line.strip())
 
+        lines = sorted(lines, key=lambda x: float(x[-3]))
         for line in lines:
             path = line.split(" ")[1]
             path1 = path.replace("/dados", "")
@@ -323,13 +327,17 @@ def velodyne_data():
             number_shots = line.split(" ")[2]
             number_shots_array.append(int(number_shots))
 
-            times_clouds_points.append(float(line.split(" ")[-1]))
+            times_clouds_points.append(float(line.split(" ")[-3]))
+            # path da nuvem de pontos, o number_shot respectivo e o timeestamp
+            points_velodyne.append([path1, int(number_shots), float(line.split(" ")[-3])])
+
                     
-    
+    data = []
     # for i in range(len(path_array)):
     for j in range(ranger_init, ranger_end):
-        with open(path_array[j], "rb") as f:
-            for i in range(number_shots_array[j]):
+        with open(points_velodyne[j][0], "rb") as f:
+            
+            for i in range(points_velodyne[j][1]):
                 laser_data = {}
                 laser_data['h_angle'] = struct.unpack('d', f.read(8))[0]
                 laser_data['points'] = []
@@ -338,25 +346,31 @@ def velodyne_data():
 
                 reflectances = struct.unpack('32B', f.read(32))
 
-                for j in range(32):
+                for k in range(32):
                     laser_data['points'].append((
-                        ranges[velodyne_ray_order[j]] / 500.0,
-                        velodyne_vertical_angles[j],
-                        reflectances[velodyne_ray_order[j]]
+                        ranges[velodyne_ray_order[k]] / 500.0,
+                        velodyne_vertical_angles[k],
+                        reflectances[velodyne_ray_order[k]],
+                        points_velodyne[j][2]
                     ))
                 data.append(laser_data)
 
         
         for shot in data:
-            horiz_angle = shot['h_angle']
+            horiz_angle = -shot['h_angle']
             horiz_angle = np.radians(horiz_angle)
-            for dist, vert_angle, reflect in shot['points']:
+            for dist, vert_angle, reflect, time in shot['points']:
                 vert_angle = np.radians(vert_angle)
-                x = dist * np.cos(vert_angle) * np.sin(horiz_angle)
-                y = dist * np.cos(vert_angle) * np.cos(horiz_angle)
+
+                if (dist * np.cos(vert_angle)) < 5.0 :
+                    continue
+
+                x = dist * np.cos(vert_angle) * np.cos(horiz_angle)
+                y = dist * np.cos(vert_angle) * np.sin(horiz_angle)
                 z = dist * np.sin(vert_angle)
-                reflect *= np.clip((10 / 255.0), 0, 1)
+                reflect *= np.clip((5 / 255.0), 0, 1)
                 points.append([x, y, z])
+                points_time.append([x, y, z, time])
                 colors.append([reflect, reflect, reflect])
 
         # Criar uma nuvem de pontos Open3D
@@ -364,38 +378,13 @@ def velodyne_data():
         pcd.points = o3d.utility.Vector3dVector(points)
         clouds_points.append(pcd)
         pcd.colors = o3d.utility.Vector3dVector(colors)
-
-# Visualizar a nuvem de pontos
-# o3d.visualization.draw_geometries([clouds_points[0]])
+    print("END VELODYNE\n")
     
 velodyne_data()
-print("END VELODYNE\n")
-
-'''
-def transform_point_cloud(pcd, pose):
-    # Extrair a rotação e translação da pose
-    x, y, theta = pose
-
-    # Calcular a matriz de rotação 2D
-    c = np.cos(theta)
-    s = np.sin(theta)
-    rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
-
-    # Criar a matriz de transformação 4x4
-    transform = np.eye(4)
-    transform[:2, :2] = rotation[:2, :2]
-    transform[:2, 3] = [x, y]
-
-    
-    # Aplicar a transformação na nuvem de pontos
-    transformed_pcd = pcd.transform(transform)
-
-    return transformed_pcd
-'''
 
 def transform_point_cloud(pcd, pose):
     # Matriz de rotação
-    x,y,theta = pose
+    x,y,theta,time = pose
     R = np.array([[np.cos(theta), -np.sin(theta), 0],
                 [np.sin(theta), np.cos(theta), 0],
                 [0, 0, 1]])
@@ -413,20 +402,34 @@ def transform_point_cloud(pcd, pose):
 
 pcd_list = []
 
+
+
+
 for i, cloud_point in enumerate(clouds_points):
-    # if velocity[i+ranger_init] < 0.2:
-    #     continue
+    if velocity[i+ranger_init] < 0.2:
+        continue
 
-    # closest_idx = find_nearest_timestamp(times_gps, times_clouds_points[i+ranger_init])
-    closest_idx = np.argmin(np.abs(np.array(times_gps) - times_clouds_points[i+ranger_init]))
-
+    # closest_idx = find_nearest_timestamp(points_angle[i][3])
+    timestamp = points_time[i][3]
+    closest_idx = np.argmin(np.abs(np.array(points_angle[i][3] - timestamp)))
+    menor = 0
+    diffs = []
+    idx = 0
+    for j in range(len(points_angle)):
+        difference = np.abs(np.array(points_time[j][3] - points_angle[j][3]))
+        diffs.append(difference)
+        if diffs[j] > diffs[j-1]:
+            menor = diffs[j-1]
+            idx = j-1
+            break 
+        print(f"Diferença para o índice {j}: {difference}")
     # Transformar a nuvem de pontos
-    transformed_pcd = transform_point_cloud(cloud_point, points_angle[closest_idx])
+    transformed_pcd = transform_point_cloud(cloud_point, points_angle[idx])
     transformed_pcd.points = o3d.utility.Vector3dVector(np.asarray(transformed_pcd.points))
 
     # Adicionar a nuvem de pontos transformada à lista
     pcd_list.append(transformed_pcd)
-    break
+    # break
 
 # o3d.visualization.draw_geometries(pcd_list)
 
