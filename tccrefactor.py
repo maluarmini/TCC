@@ -19,8 +19,8 @@ INITIAL_PATH = "./logs_iara/logs_iara/"
 # Path onde estão salvos os binários das disparidades
 PATH_DISPARITYS = "./disparidades/"
 
-RANGE_INIT = 2000
-RANGE_END = 2100
+RANGE_INIT = 0
+RANGE_END = 50
 # define a estrutura do registro do arquivo index
 index_format = "<8sL"
 
@@ -415,7 +415,7 @@ class Velodyne:
             times_clouds_points.append(cloud.timestamp)
             pcd.colors = o3d.utility.Vector3dVector(colors)
 
-        print("End Velodyne\n")
+        print("End Velodyne")
         return clouds_points, times_clouds_points
 
 def transform_point_cloud(pcd, pose):
@@ -687,7 +687,7 @@ class Bumblebee:
         clouds_points = []
         for i in range(len(disparities)):
             disparity = disparities[i]
-            left = images[i].image_left
+            left = images[i+RANGE_INIT].image_left
             clouds_points.append(view_point_cloud(left, disparity, cam_config))
         return clouds_points
 
@@ -701,11 +701,12 @@ def main():
     velodyne_clouds_messages = Velodyne.read_and_ordination_velodyne()  # Obter as nuvens de Velodyne
     clouds_points, times_clouds_points = Velodyne.create_points_clouds(velodyne_clouds_messages)
     
+    '''
     images = Bumblebee.read_images_log()
     cam_config = LcadCameraConfig
-    # clouds_points = []
-    # clouds_points = Bumblebee.create_point_clouds(images, Bumblebee.read_disparity_files(PATH_DISPARITYS), cam_config)
-
+    clouds_points = []
+    clouds_points = Bumblebee.create_point_clouds(images, Bumblebee.read_disparity_files(PATH_DISPARITYS), cam_config)
+    '''
     pcd_list = create_pcd_list(clouds_points, times_clouds_points, points_angle_dead_reckoning)
     view_map(pcd_list)
     
