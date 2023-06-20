@@ -1,3 +1,6 @@
+
+import copy
+from tqdm import tqdm
 from dataclasses import dataclass
 import math
 import matplotlib
@@ -11,20 +14,30 @@ from myhitnet.hitnet import HitNet, ModelType, CameraConfig
 import os
 
 # Path principal do arquivo de dados
-LOG_PATH = './logs_iara/logs_iara/log-volta-da-ufes-20181206.txt'
+LOG_PATH = '/home/filipe/data/logs_iara/log-volta-da-ufes-20181206.txt'
 
 # Path a ser retirado para ficar apenas com o path do arquivo de nuvem de pontos
-INITIAL_PATH = "./logs_iara/logs_iara/" 
+INITIAL_PATH = "/home/filipe/data/logs_iara"
 
 # Path onde estão salvos os binários das disparidades
 PATH_DISPARITYS = "./disparidades/"
 
-RANGE_INIT = 0
-RANGE_END = 50
+# painel da ufes (com quebra mola)
+# RANGE_INIT = 2770
+# RANGE_END = 2830
+
+# inicio do log em movimento
+RANGE_INIT = 230
+RANGE_END = 270
+
+# centro de linguas
+# RANGE_INIT = 1275
+# RANGE_END = 1325
+
 # define a estrutura do registro do arquivo index
 index_format = "<8sL"
 
-matplotlib.use('TkAgg') 
+matplotlib.use('TkAgg')
 
 # Velodyne vertical angles e ray order
 velodyne_vertical_angles = [
@@ -39,10 +52,85 @@ velodyne_ray_order = [
     11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]
 
 
+def load_params(log):
+    param_lines = [line for line in log if line.startswith('PARAM')]
+    params = {}
+    for line in param_lines:
+        line = line.split()
+        params[line[1]] = "".join(line[2:-3])
+    return params
+
+
+class Transforms:
+    def __init__(self, params):
+        # TODO: considerar colocar a rotacao que rotaciona o sistema de coordenadas
+        # da imagem aqui tambem.
+        self.vel2board = Transforms._transformation_from_params(
+            params['velodyne_x'],
+            params['velodyne_y'],
+            params['velodyne_z'],
+            params['velodyne_roll'],
+            params['velodyne_pitch'],
+            params['velodyne_yaw']
+        )
+
+        self.cam2board = Transforms._transformation_from_params(
+            params['camera3_x'],
+            params['camera3_y'],
+            params['camera3_z'],
+            params['camera3_roll'],
+            params['camera3_pitch'],
+            params['camera3_yaw']
+        )
+
+        self.gps2board = Transforms._transformation_from_params(
+            params['gps_nmea_x'],
+            params['gps_nmea_y'],
+            params['gps_nmea_z'],
+            params['gps_nmea_roll'],
+            params['gps_nmea_pitch'],
+            params['gps_nmea_yaw']
+        )
+
+        self.board2car = Transforms._transformation_from_params(
+            params['sensor_board_1_x'],
+            params['sensor_board_1_y'],
+            params['sensor_board_1_z'],
+            params['sensor_board_1_roll'],
+            params['sensor_board_1_pitch'],
+            params['sensor_board_1_yaw']
+        )
+
+        self.vel2car = np.dot(self.board2car, self.vel2board)
+        self.cam2car = np.dot(self.board2car, self.cam2board)
+        self.gps2car = np.dot(self.board2car, self.gps2board)
+        self.car2world = np.eye(4)
+        self._update_transforms_to_world()
+
+    def update_pose(self, pose):
+        self.car2world = Transforms._transformation_from_params(
+            pose[0], pose[1], 0, 0, 0, pose[2])
+        self._update_transforms_to_world()
+
+    def _update_transforms_to_world(self):
+        self.vel2world = np.dot(self.car2world, self.vel2car)
+        self.cam2world = np.dot(self.car2world, self.cam2car)
+        self.gps2world = np.dot(self.car2world, self.gps2car)
+
+    @staticmethod
+    def _transformation_from_params(x, y, z, roll, pitch, yaw):
+        T = np.eye(4)
+        T[:3, :3] = \
+            o3d.geometry.get_rotation_matrix_from_xyz((roll, pitch, yaw))
+        T[:3, 3] = [x, y, z]
+        return T
+
+
 def carmen_global_convert_degmin_to_double(dm_format: float) -> float:
     degree = math.floor(dm_format / 100.0)
     minutes = (dm_format - degree * 100.0) / 60.0
     return degree + minutes
+
 
 class GdcToUtm:
     RADIANS_PER_DEGREE = 0.0174532925199432957692
@@ -178,6 +266,7 @@ class GdcToUtm:
 
         return utm_x, utm_y, utm_z, utm_zone, utm_hemisphere_north
 
+
 @dataclass
 class GpsMsg:
     latitude: float
@@ -186,16 +275,17 @@ class GpsMsg:
     north_south: float
     east_west: float
     timestamp: float
-    
+
     @staticmethod
     def parse(line):
         words = line.split(" ")
         return GpsMsg(float(words[3]), float(words[5]), float(words[11]), words[4], words[6], float(words[-3]))
 
+
 class GPS:
     @staticmethod
     def read_and_ordination_gps():
-        print("Init GPS")  
+        print("Init GPS")
         lines = []
         with open(LOG_PATH, 'r') as file:
             for line in file:
@@ -206,14 +296,15 @@ class GPS:
 
             return [GpsMsg.parse(line) for line in lines]
 
+
 class GpsFormatter:
     @staticmethod
-    def calcular_angulos(x_point, y_point,i, time,points_angle, x_points, y_points):
+    def calcular_angulos(x_point, y_point, i, time, points_angle, x_points, y_points):
         p0 = [x_point, y_point]
         theta = 0
-        for i in range(len(x_points)):
-            if ((p0[0] - x_points[i]) ** 2 + (p0[1] - y_points[i]) ** 2) ** 0.5 > 5:
-                theta = math.atan2(y_points[i], x_points[i])
+        for j in range(i, len(x_points)):
+            if ((p0[0] - x_points[j]) ** 2 + (p0[1] - y_points[j]) ** 2) ** 0.5 > 5:
+                theta = math.atan2(y_points[j] - p0[1], x_points[j] - p0[0])
                 # faz uma tupla com o angulo, ponto, timestamp
                 points_angle.append((x_point, y_point, theta, time))
                 break
@@ -230,18 +321,20 @@ class GpsFormatter:
         for gps_msg in gps_messages:
             x, y, z, _, _ = GdcToUtm.Convert(
                 gps_msg.latitude, gps_msg.longitude, gps_msg.altitude,  gps_msg.north_south,  gps_msg.east_west)
-            convert_data.append([x, y, z])
+            convert_data.append([x, y, z, gps_msg.timestamp])
 
         for ponto in convert_data:
-            x, y, _ = ponto
+            x, y, _, timestamp = ponto
             x_points.append(x - convert_data[0][0])
             y_points.append(y - convert_data[0][1])
-            times_gps.append(gps_msg.timestamp)
+            times_gps.append(timestamp)
 
         for i in range(len(x_points)):
-            points_angle = GpsFormatter.calcular_angulos(x_points[i], y_points[i], i, times_gps[i], points_angle, x_points, y_points)
-        print("End GPS") 
+            points_angle = GpsFormatter.calcular_angulos(
+                x_points[i], y_points[i], i, times_gps[i], points_angle, x_points, y_points)
+        print("End GPS")
         return points_angle, x_points, y_points
+
 
 @dataclass
 class OdometryMsg:
@@ -254,12 +347,12 @@ class OdometryMsg:
         words = line.split(" ")
         return OdometryMsg(float(words[1]), float(words[2]), float(words[-3]))
 
+
 class DeadReckoning:
     v_m = 1.0
     a_m = 0.89
     a_add = -0.004
     L = 2.625  # Distância entre eixos do veículo
-    
 
     @staticmethod
     def read_and_ordination_dead_reckoning():
@@ -278,17 +371,18 @@ class DeadReckoning:
     def convert_velocity_and_angle(odometry_msg):
         # Convertendo elementos de velocity e angle em float
         odometry_msg.speed = odometry_msg.speed * DeadReckoning.v_m
-        odometry_msg.steering_angle = odometry_msg.steering_angle * DeadReckoning.a_m + DeadReckoning.a_add
+        odometry_msg.steering_angle = odometry_msg.steering_angle * \
+            DeadReckoning.a_m + DeadReckoning.a_add
         return odometry_msg
 
     @staticmethod
-    def calculate_initial_angle(x_points,y_points):
+    def calculate_initial_angle(x_points, y_points):
         p0 = [x_points[0], y_points[0]]
         for i in range(len(x_points)):
             if ((p0[0] - x_points[i]) ** 2 + (p0[1] - y_points[i]) ** 2) ** 0.5 > 5:
                 theta = math.atan2(y_points[i] - p0[1], x_points[i] - p0[0])
                 break
-        
+
         return theta
 
     @staticmethod
@@ -302,7 +396,8 @@ class DeadReckoning:
 
         # Converter velocidade e angulo
         for i in range(len(odometry_messages)):
-            odometry_messages[i] = DeadReckoning.convert_velocity_and_angle(odometry_messages[i])
+            odometry_messages[i] = DeadReckoning.convert_velocity_and_angle(
+                odometry_messages[i])
 
         # Velocidade e ângulo inicial
         v = odometry_messages[0].speed
@@ -311,7 +406,8 @@ class DeadReckoning:
         for i, odometry_msg in enumerate(odometry_messages, 1):
             if i == len(odometry_messages):
                 break
-            dt = odometry_messages[i].timestamp - odometry_messages[i - 1].timestamp
+            dt = odometry_messages[i].timestamp - \
+                odometry_messages[i - 1].timestamp
             v = odometry_msg.speed
             a = odometry_msg.steering_angle
             t = odometry_msg.timestamp
@@ -324,6 +420,7 @@ class DeadReckoning:
 
         print("End Dead Reckoning")
         return points_angle_dead_reckoning
+
 
 @dataclass
 class VelodyneCloud:
@@ -342,6 +439,7 @@ class VelodyneCloud:
 
         return VelodyneCloud(timestamp, num_shots, path_shots_data)
 
+
 class Velodyne:
     @staticmethod
     def read_and_ordination_velodyne():
@@ -355,14 +453,15 @@ class Velodyne:
         lines = sorted(lines, key=lambda x: float(x.split()[-3]))
 
         return [VelodyneCloud.parse(line,  INITIAL_PATH) for line in lines]
-    
+
     @staticmethod
     def velodyne_clouds(velodyne_clouds):
         # for i,cloud in enumerate(velodyne_clouds):
         for j in range(RANGE_INIT, RANGE_END):
             # if (i < ranger_init) or (i > ranger_end):
             #     continue
-            velodyne_clouds[j].shots_data = []  # Inicialize shots_data como uma lista vazia
+            # Inicialize shots_data como uma lista vazia
+            velodyne_clouds[j].shots_data = []
             with open(velodyne_clouds[j].path_shots_data, "rb") as f:
                 for _ in range(velodyne_clouds[j].num_shots):
                     laser_data = {}
@@ -384,12 +483,13 @@ class Velodyne:
 
     @staticmethod
     def create_points_clouds(velodyne_clouds):
-        Velodyne.velodyne_clouds(velodyne_clouds)  # Preencher os dados dos tiros
+        # Preencher os dados dos tiros
+        Velodyne.velodyne_clouds(velodyne_clouds)
         clouds_points = []
         times_clouds_points = []
-        
+
         for cloud in velodyne_clouds:
-            if cloud.shots_data is None:  
+            if cloud.shots_data is None:
                 continue
             points, colors = [], []
             for shot in cloud.shots_data:  # cloud.shots_data já é uma lista de dados de tiro
@@ -398,7 +498,7 @@ class Velodyne:
                 for dist, vert_angle, reflect, time in shot['points']:
                     vert_angle = np.radians(vert_angle)
 
-                    if (dist * np.cos(vert_angle)) < 5.0 :
+                    if (dist * np.cos(vert_angle)) < 5.0:
                         continue
 
                     x = dist * np.cos(vert_angle) * np.cos(horiz_angle)
@@ -418,33 +518,57 @@ class Velodyne:
         print("End Velodyne")
         return clouds_points, times_clouds_points
 
+
 def transform_point_cloud(pcd, pose):
     # Matriz de rotação
-    x,y,theta,time = pose
+    x, y, theta, time = pose
     R = np.array([[np.cos(theta), -np.sin(theta), 0],
-                [np.sin(theta), np.cos(theta), 0],
-                [0, 0, 1]])
+                  [np.sin(theta), np.cos(theta), 0],
+                  [0, 0, 1]])
 
     # Vetor de translação
     t = np.array([x, y, 0])
 
     # Aplicar rotação e translação na nuvem de pontos
-    pcd.rotate(R)
+    pcd.rotate(R, center=[0, 0, 0])
     pcd.translate(t)
     return pcd
 
-def create_pcd_list(clouds_points, times_clouds_points, points_angle):
+
+def draw_car_coordinate_system(pose):
+    (x, y, th, _) = pose
+    # x = y = th = 0
+    axes = o3d.geometry.TriangleMesh.create_coordinate_frame()
+    axes = axes.translate((x, y, 0))
+    R = o3d.geometry.get_rotation_matrix_from_xyz((0, 0, th))
+    axes = axes.rotate(R)
+    return axes
+
+
+def create_pcd_list(clouds_points, times_clouds_points, points_angle, tf: Transforms, sensor: str):
     pcd_list = []
 
     for i, (cloud_point, timestamp) in enumerate(zip(clouds_points, times_clouds_points)):
-        
-        closest_idx = np.argmin(np.abs([p[3] - timestamp for p in points_angle]))
 
-        transformed_pcd = transform_point_cloud(cloud_point, points_angle[closest_idx])
+        closest_idx = np.argmin(
+            np.abs([p[3] - timestamp for p in points_angle]))
+
+        tf.update_pose(points_angle[closest_idx])
+
+        # transformed_pcd = transform_point_cloud(
+        #    cloud_point, points_angle[closest_idx])
+        if sensor == 'velodyne':
+            transformed_pcd = cloud_point.transform(tf.vel2world)
+        else:
+            transformed_pcd = cloud_point.transform(tf.cam2world)
 
         pcd_list.append(transformed_pcd)
-    
+
+        axes = draw_car_coordinate_system(points_angle[closest_idx])
+        pcd_list.append(axes)
+
     return pcd_list
+
 
 def view_map(pcd_list):
     # Definir a cor de fundo da visualização como azul
@@ -452,11 +576,13 @@ def view_map(pcd_list):
     visualizer.create_window()
     for pcd in pcd_list:
         visualizer.add_geometry(pcd)
-    visualizer.get_render_option().background_color = np.asarray([0.1, 0.1, 0.9])
+    visualizer.get_render_option().background_color = np.asarray([
+        0.1, 0.1, 0.9])
 
     # Visualizar a nuvem de pontos com o background azul
     visualizer.run()
     visualizer.destroy_window()
+
 
 class NeuralStereoMatcher:
     def __init__(self, baseline_m, focal_length_px):
@@ -476,7 +602,17 @@ class NeuralStereoMatcher:
         self.hitnet_depth = HitNet(model_path, model_type, cam)
 
     def inference(self, left_img, right_img):
-        return self.hitnet_depth(left_img, right_img)
+        # 150 a 390
+        left_crop = left_img[150:390, :, :]
+        right_crop = right_img[150:390, :, :]
+
+        disparity_croped = self.hitnet_depth(left_crop, right_crop)
+
+        disparity = np.zeros([left_img.shape[0], left_img.shape[1]])
+        disparity[150:390, :] = disparity_croped
+
+        return disparity
+
 
 class LcadCameraConfig:
     # class CameraConfig:
@@ -488,12 +624,14 @@ class LcadCameraConfig:
     cy = 0.493814 * height
     baseline = 0.24004
 
+
 class OddCameraConfig:
     fx = 696.475
     fy = 696.455
     cx = 637.755
     cy = 336.5585
     baseline = 0.120153
+
 
 def stereo_matching_opencv(imgL, imgR):
     grayL = cv2.cvtColor(imgL, cv2.COLOR_BGR2GRAY)
@@ -527,9 +665,10 @@ def stereo_matching_opencv(imgL, imgR):
     # see https://github.com/opencv/opencv/blob/master/samples/cpp/stereo_match.cpp
     # Como a disparidade eh representada usando uint16, eles multiplicam por 16 para
     # manter um nivel razoavel de precisao razoavel dada a quantidade pequena de bits.
-    disparity = disparity.astype(np.float) / 16.0
+    disparity = disparity.astype(np.float64) / 16.0
 
     return disparity
+
 
 def reproject_3d_carmen(xl, yl, disparity, cam_config):
     # double xr = right_point.x - camera->xc;
@@ -549,6 +688,7 @@ def reproject_3d_carmen(xl, yl, disparity, cam_config):
     Y = -fx_fy * (cam_config.baseline * yl) / (xr - xl)
 
     return X, Y, Z
+
 
 def reproject_3d(xl, yl, disparity, cam_config):
     """
@@ -572,6 +712,7 @@ def reproject_3d(xl, yl, disparity, cam_config):
 
     return X, Y, Z
 
+
 def view_disparity_img(left, right, disparity):
     # visualization of the disparity map
     d_view = np.copy(disparity)
@@ -587,30 +728,37 @@ def view_disparity_img(left, right, disparity):
 
     mult = (1000 / view.shape[1])
     view = cv2.resize(view, (
-        int(mult * view.shape[1]), 
+        int(mult * view.shape[1]),
         int(mult * view.shape[0])
     ))
-    
+
     cv2.imshow("view", view)
     cv2.waitKey(1)
+
 
 def view_point_cloud(left, disparity, cam_config):
     p3D = []
 
     for row in range(left.shape[0]):
+        # corta o ceu
+        if row < 150:
+            continue
+
         for column in range(left.shape[1]):
+            # corta o carro
+            # if (column > 150) and (row > 390):
+            if row > 390:
+                continue
+
             d = disparity[row][column]
 
             # ignore small disparities
             if d < 1.5:
                 continue
 
-            # Nota: estou espelhando x e usando -d como entrada apenas
-            # para a visualização ficar certa na lib que mostra a pointcloud
-            # na tela.
             X, Y, Z = reproject_3d(
-                left.shape[1] - column - 1, row, -d, cam_config)
-            #X, Y, Z = reproject_3d_carmen(column, row, d)
+                column, row, d, cam_config)
+
             b, g, r = left[row][column]
 
             # ignore distant points for a better visualization
@@ -646,6 +794,7 @@ class StereoImage:
 
         return StereoImage(timestamp, path_image_data)
 
+
 class Bumblebee:
     @staticmethod
     def read_images_log():
@@ -656,7 +805,7 @@ class Bumblebee:
                 if line.startswith('BUMBLEBEE_BASIC_STEREOIMAGE_IN_FILE3'):
                     lines.append(line.strip())
 
-        lines = sorted(lines, key=lambda x: float(x[-3]))
+        lines = sorted(lines, key=lambda x: float(x.split()[-3]))
 
         return [StereoImage.parse(line) for line in lines]
 
@@ -668,47 +817,119 @@ class Bumblebee:
                 data = f.read(image_size * 2)
                 data_left = data[:image_size]
                 data_right = data[image_size:]
-                images[i].image_left = np.frombuffer(data_left, dtype=np.uint8).reshape(480, 640, 3)
-                images[i].image_right = np.frombuffer(data_right, dtype=np.uint8).reshape(480, 640, 3)
+                images[i].image_left = np.frombuffer(
+                    data_left, dtype=np.uint8).reshape(480, 640, 3)
+                images[i].image_right = np.frombuffer(
+                    data_right, dtype=np.uint8).reshape(480, 640, 3)
         print("End reading images")
 
     def read_disparity_files(directory):
         disparities = []
+
         for i in range(RANGE_INIT, RANGE_END):
             file_path = os.path.join(directory, f"disparidade{i}.bin")
             disparity = np.fromfile(file_path, dtype=np.float32)
-            disparity = disparity.reshape((480, 640))  # Substitua 'height' e 'width' pelos tamanhos corretos das imagens
+            # Substitua 'height' e 'width' pelos tamanhos corretos das imagens
+            disparity = disparity.reshape((480, 640))
             disparities.append(disparity)
         return disparities
-    
+
     @staticmethod
     def create_point_clouds(images, disparities, cam_config):
         Bumblebee.load_images(images)
         clouds_points = []
-        for i in range(len(disparities)):
-            disparity = disparities[i]
-            left = images[i+RANGE_INIT].image_left
-            clouds_points.append(view_point_cloud(left, disparity, cam_config))
+        R = o3d.geometry.get_rotation_matrix_from_xyz((0, np.pi/2, -np.pi/2))
+        neural_stereo = NeuralStereoMatcher(
+            cam_config.baseline, cam_config.fx)
+
+        for i in tqdm(range(RANGE_INIT, RANGE_END)):
+            # disparity = # disparities[i]
+            left = images[i].image_left
+            right = images[i].image_right
+
+            left = np.clip(left.astype(np.float64) *
+                           2, 0, 255).astype(np.uint8)
+            right = np.clip(right.astype(np.float64) *
+                            2, 0, 255).astype(np.uint8)
+
+            disparity = neural_stereo.inference(left, right)
+            # disparity = stereo_matching_opencv(left, right)
+
+            view = np.copy(disparity)
+            view -= np.min(view)
+            view /= np.max(view)
+            view *= 255
+            view = view.astype(np.uint8)
+            view = cv2.cvtColor(view, cv2.COLOR_GRAY2RGB)
+            cv2.imshow("disparity", np.hstack(
+                [cv2.cvtColor(left, cv2.COLOR_RGB2BGR), view]))
+            cv2.waitKey(5)
+
+            cloud = view_point_cloud(left, disparity, cam_config)
+            cloud = cloud.rotate(R, center=[0, 0, 0])
+            clouds_points.append(cloud)
         return clouds_points
 
+
 def main():
+    """
+    Sistema de coordenadas do open3d: 
+        X: vermelho 
+        Y: verde
+        Z: azul
+    Sistemas de coordenadas padrão: 
+        X: para frente
+        Y: para esquerda
+        Z: para cima
+    Sistemas de coordenadas da câmera: 
+        X: para direita
+        Y: para baixo
+        Z: para frente
+    """
+
+    with open(LOG_PATH, 'r') as file:
+        log = file.readlines()
+
+    params = load_params(log)
+
+    tf = Transforms(params)
+
     gps_messages = GPS.read_and_ordination_gps()
-    points_angle_gps, x_points, y_points = GpsFormatter.gps_conversation(gps_messages)
+    points_angle_gps, x_points, y_points = GpsFormatter.gps_conversation(
+        gps_messages)
 
     dead_reckoning_messages = DeadReckoning.read_and_ordination_dead_reckoning()
-    points_angle_dead_reckoning = DeadReckoning.arckemann_model(dead_reckoning_messages,x_points, y_points)
+    points_angle_dead_reckoning = DeadReckoning.arckemann_model(
+        dead_reckoning_messages, x_points, y_points)
 
-    velodyne_clouds_messages = Velodyne.read_and_ordination_velodyne()  # Obter as nuvens de Velodyne
-    clouds_points, times_clouds_points = Velodyne.create_points_clouds(velodyne_clouds_messages)
-    
-    '''
+    # points_angle_dead_reckoning = points_angle_gps
+
+    """
+    # Obter as nuvens de Velodyne
+    velodyne_clouds_messages = Velodyne.read_and_ordination_velodyne()
+    clouds_points, times_clouds_points = Velodyne.create_points_clouds(
+        velodyne_clouds_messages)
+    pcd_list = create_pcd_list(
+        clouds_points, times_clouds_points, points_angle_dead_reckoning, tf, 'velodyne')
+    """
+    pcd_list = []
+
     images = Bumblebee.read_images_log()
     cam_config = LcadCameraConfig
     clouds_points = []
-    clouds_points = Bumblebee.create_point_clouds(images, Bumblebee.read_disparity_files(PATH_DISPARITYS), cam_config)
-    '''
-    pcd_list = create_pcd_list(clouds_points, times_clouds_points, points_angle_dead_reckoning)
+    disparities = []
+    # disparities = Bumblebee.read_disparity_files(PATH_DISPARITYS)
+    clouds_points = Bumblebee.create_point_clouds(
+        images, disparities, cam_config)
+    times_clouds_points = [img.timestamp
+                           for img in images[RANGE_INIT:RANGE_END]]
+    # """
+    pcd_list += create_pcd_list(
+        clouds_points, times_clouds_points, points_angle_dead_reckoning, tf, 'camera')
+
     view_map(pcd_list)
-    
+    # """
+
+
 if __name__ == "__main__":
     main()
